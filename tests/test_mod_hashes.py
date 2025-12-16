@@ -1,7 +1,6 @@
 """Tests for mod_hashes module."""
 
 
-
 def test_import_cli() -> None:
     """Test that CLI can be imported."""
     from vibed_chia_tools.cli import main

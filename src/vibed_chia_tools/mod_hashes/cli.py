@@ -10,6 +10,7 @@ from pathlib import Path
 import click
 
 from ..known_mods import KNOWN_MODS, get_mod_label
+from ..utils import DEFAULT_DB_PATH
 from .db_reader import BlockData, get_generators_for_refs, iterate_blocks
 
 
@@ -17,9 +18,10 @@ from .db_reader import BlockData, get_generators_for_refs, iterate_blocks
 @click.option(
     "--db",
     "db_path",
-    required=True,
+    default=DEFAULT_DB_PATH,
     type=click.Path(exists=True),
-    help="Path to blockchain_v2_mainnet.db",
+    show_default=True,
+    help="Path to blockchain database",
 )
 @click.option(
     "--start",

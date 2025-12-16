@@ -65,6 +65,122 @@ Each unknown MOD is saved as `{hash}.clvm.hex` containing hex-encoded serialized
 brun -d $(cat unknown_mods/9a6c5ff6689b900c6c5d2dddd84b0ff5492e9ca92228beca280832e438c273df.clvm.hex)
 ```
 
+---
+
+### list-blocks
+
+List blocks with their heights and compressed sizes. Useful for finding large or interesting blocks to analyze.
+
+```bash
+# List all blocks with size >= 100KB
+chia-scan list-blocks --db ~/.chia/mainnet/db/blockchain_v2_mainnet.sqlite \
+                      --min-size 100k
+
+# List top 20 largest blocks
+chia-scan list-blocks --db ~/.chia/mainnet/db/blockchain_v2_mainnet.sqlite \
+                      --top 20 --sort size --desc
+
+# List blocks in a height range
+chia-scan list-blocks --db ~/.chia/mainnet/db/blockchain_v2_mainnet.sqlite \
+                      --start 5000000 --end 5001000
+```
+
+Options:
+- `--db PATH` - Path to blockchain database (required)
+- `--start HEIGHT` - Start block height (inclusive)
+- `--end HEIGHT` - End block height (inclusive)
+- `--min-size SIZE` - Minimum compressed block size (e.g., '100k', '1M')
+- `--max-size SIZE` - Maximum compressed block size
+- `--top N` - Show only top N blocks
+- `--sort [height|size]` - Sort by height or size (default: height)
+- `--desc` - Sort in descending order
+
+---
+
+### extract-blocks
+
+Extract blocks or generators from the blockchain database to binary files.
+
+```bash
+# Extract generators for a height range
+chia-scan extract-blocks --db ~/.chia/mainnet/db/blockchain_v2_mainnet.sqlite \
+                         -o ./generators --height 5000000-5001000 --generator-only
+
+# Extract large blocks (compressed size >= 100KB)
+chia-scan extract-blocks --db ~/.chia/mainnet/db/blockchain_v2_mainnet.sqlite \
+                         -o ./large_blocks --size 100k- --generator-only
+
+# Extract specific heights from a file
+chia-scan extract-blocks --db ~/.chia/mainnet/db/blockchain_v2_mainnet.sqlite \
+                         -o ./blocks --heights-file heights.txt
+```
+
+Options:
+- `--db PATH` - Path to blockchain database (required)
+- `-o, --output PATH` - Directory to write extracted files (required)
+- `--height RANGE` - Block height range (e.g., '1000-2000', '1000-', '-2000')
+- `--heights-file PATH` - File with list of heights, or '-' for stdin
+- `--size RANGE` - Block size range (e.g., '100k-1M'). Supports k, M, G suffixes.
+- `--generator-only` - Extract only the generator portion (not full blocks)
+- `--decompress/--no-decompress` - Decompress blocks before writing (default: decompress)
+
+Output files are named:
+- Generators: `generator_{height}_{hash}.bin`
+- Blocks: `block_{height}_{hash}.bin` or `.bin.zstd` if compressed
+
+---
+
+### build-synthetic
+
+Build a synthetic generator from real spends for compression testing. This extracts spends from multiple block generators, filters out spends with abnormally large atoms (NFTs, JPEGs, etc.), and combines them into a single generator.
+
+```bash
+# Build with 1000 spends (default)
+chia-scan build-synthetic -i ./generators -o synthetic.bin
+
+# Build targeting ~1MB serialized size
+chia-scan build-synthetic -i ./generators -o synthetic.bin --target-size 1M
+
+# Filter out spends with atoms > 500 bytes (stricter NFT filtering)
+chia-scan build-synthetic -i ./generators -o synthetic.bin --max-atom-size 500
+
+# Just show statistics without writing
+chia-scan build-synthetic -i ./generators --stats-only
+```
+
+Options:
+- `-i, --input PATH` - Directory containing generator `.bin` files (required)
+- `-o, --output PATH` - Output file path (default: synthetic_generator.bin)
+- `--max-atom-size N` - Maximum atom size to allow (default: 1000 bytes)
+- `--target-spends N` - Target number of spends to include
+- `--target-size SIZE` - Target serialized size (e.g., '1M', '500K')
+- `--stats-only` - Only print statistics, don't write output
+
+---
+
+## Typical Workflow
+
+1. **Find interesting blocks** using `list-blocks`:
+   ```bash
+   chia-scan list-blocks --db blockchain.sqlite --min-size 50k --top 100 --sort size --desc
+   ```
+
+2. **Extract generators** from those blocks:
+   ```bash
+   chia-scan extract-blocks --db blockchain.sqlite -o ./generators \
+                            --size 50k- --generator-only
+   ```
+
+3. **Analyze MOD usage** in a block range:
+   ```bash
+   chia-scan mod-hashes --db blockchain.sqlite --start 5000000 --end 5010000
+   ```
+
+4. **Build synthetic generators** for testing:
+   ```bash
+   chia-scan build-synthetic -i ./generators -o synthetic.bin --target-size 1M
+   ```
+
 ## Development
 
 ```bash
