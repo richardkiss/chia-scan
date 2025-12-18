@@ -2,6 +2,7 @@
 
 import click
 
+from .block_info import block_info
 from .build_synthetic import build_synthetic
 from .extract_blocks import extract_blocks
 from .list_blocks import list_blocks
@@ -15,10 +16,11 @@ def main() -> None:
     pass
 
 
-main.add_command(mod_hashes)
-main.add_command(list_blocks)
-main.add_command(extract_blocks)
+main.add_command(block_info)
 main.add_command(build_synthetic)
+main.add_command(extract_blocks)
+main.add_command(list_blocks)
+main.add_command(mod_hashes)
 
 
 if __name__ == "__main__":

@@ -118,6 +118,10 @@ KNOWN_MODS: dict[bytes, str] = {
     bytes.fromhex(
         "0893e36a88c064fddfa6f8abdb42c044584a98cb4273b80cccc83b4867b701a1"
     ): "graftroot_dl_offers",
+    # Third-party / unidentified (but commonly seen)
+    bytes.fromhex(
+        "28bc631093d2f8aaaed9d132f085b931dc2f90f742797e20f0438ac5e2e124ee"
+    ): "unknown_delegated_wrapper",
 }
 
 

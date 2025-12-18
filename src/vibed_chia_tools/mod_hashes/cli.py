@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import sys
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import click
@@ -100,24 +99,23 @@ def mod_hashes(
 
     # Track unknown MODs we've already saved (to avoid duplicates)
     saved_unknown_mods: set[bytes] = set()
+    unknown_dir: Path | None = None
 
-    # Create output directory if saving unknowns
     if save_unknown_dir:
         unknown_dir = Path(save_unknown_dir)
         unknown_dir.mkdir(parents=True, exist_ok=True)
         click.echo(f"Saving unknown MODs to: {unknown_dir}")
 
-    def process_block(
-        block: BlockData, block_refs: list[bytes]
-    ) -> tuple[int, list[tuple[bytes, bytes]], int, int]:
-        """Process a single block.
+    # Result type from process_block
+    BlockResult = tuple[int, list[tuple[bytes, bytes]], int, int]
 
-        Returns (height, [(mod_hash, mod_bytes), ...], spend_count, error_count).
-        """
+    def process_block(item: tuple[BlockData, list[bytes]]) -> BlockResult:
+        """Process a single block. Returns (height, mod_data, spend_count, errors)."""
+        block, block_refs = item
+
         if block.generator is None:
             return (block.height, [], 0, 0)
 
-        # Run the generator
         err, spend_result = run_block_generator2(
             block.generator,
             block_refs,
@@ -129,11 +127,9 @@ def mod_hashes(
         )
 
         if err is not None or spend_result is None:
-            return (block.height, [], 0, 1)  # generator error
+            return (block.height, [], 0, 1)
 
-        # Parse generator as Program for puzzle extraction
         generator_program = Program.from_bytes(block.generator)
-
         mod_data: list[tuple[bytes, bytes]] = []
         local_errors = 0
 
@@ -143,106 +139,68 @@ def mod_hashes(
                 puzzle, _ = get_puzzle_and_solution_for_coin2(
                     generator_program, block_refs, max_cost, coin, 0
                 )
-
                 clvm_puzzle = CLVMProgram.from_bytes(bytes(puzzle))
                 mod, _ = clvm_puzzle.uncurry()
-                mod_hash = mod.tree_hash()
-                mod_bytes = bytes(mod)
-                mod_data.append((mod_hash, mod_bytes))
+                mod_data.append((mod.tree_hash(), bytes(mod)))
             except Exception:
                 local_errors += 1
 
         return (block.height, mod_data, len(spend_result.spends), local_errors)
 
-    # First pass: read blocks and resolve refs (serial, I/O bound)
-    click.echo("Loading blocks from database...")
-    blocks_to_process: list[tuple[BlockData, list[bytes]]] = []
-
-    for block in iterate_blocks(db_path, start_height, end_height):
-        if block.generator is None:
-            continue
-
-        # Resolve generator refs
-        block_refs: list[bytes] = []
-        if block.generator_ref_list:
-            ref_gens = get_generators_for_refs(db_path, block.generator_ref_list)
-            block_refs = [ref_gens.get(h, b"") for h in block.generator_ref_list]
-
-        blocks_to_process.append((block, block_refs))
-
-    click.echo(f"Loaded {len(blocks_to_process)} blocks with generators.")
-    click.echo()
-
-    # Second pass: process blocks in parallel (CPU bound)
+    # Accumulators
     mod_counts: Counter[bytes] = Counter()
-    blocks_processed = 0
-    blocks_with_spends = 0
-    spends_processed = 0
-    errors = 0
-    generator_errors = 0
+    stats = {"blocks": 0, "blocks_with_spends": 0, "spends": 0, "errors": 0, "gen_errors": 0}
 
+    def handle_result(result: BlockResult) -> None:
+        """Handle result from a processed block."""
+        height, mod_data, spend_count, block_errors = result
+        stats["blocks"] += 1
+
+        if stats["blocks"] % 500 == 0:
+            click.echo(f"\r{stats['blocks']} blocks, {stats['spends']} spends...", nl=False)
+
+        if mod_data:
+            stats["blocks_with_spends"] += 1
+            stats["spends"] += len(mod_data)
+            if debug:
+                click.echo(f"  Block {height}: {len(mod_data)} spends")
+
+            for mod_hash, mod_bytes in mod_data:
+                mod_counts[mod_hash] += 1
+
+                is_unknown = mod_hash not in KNOWN_MODS and mod_hash not in saved_unknown_mods
+                if unknown_dir and is_unknown:
+                    saved_unknown_mods.add(mod_hash)
+                    (unknown_dir / f"{mod_hash.hex()}.clvm.hex").write_text(mod_bytes.hex())
+
+        if block_errors > 0:
+            if spend_count == 0:
+                stats["gen_errors"] += 1
+            else:
+                stats["errors"] += block_errors
+
+    def block_items():
+        """Yield (block, refs) tuples for blocks with generators."""
+        for block in iterate_blocks(db_path, start_height, end_height):
+            if block.generator is None:
+                continue
+            block_refs: list[bytes] = []
+            if block.generator_ref_list:
+                ref_gens = get_generators_for_refs(db_path, block.generator_ref_list)
+                block_refs = [ref_gens.get(h, b"") for h in block.generator_ref_list]
+            yield (block, block_refs)
+
+    click.echo("Processing blocks...")
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        # Submit all tasks
-        futures = {
-            executor.submit(process_block, block, refs): block.height
-            for block, refs in blocks_to_process
-        }
+        for result in executor.map(process_block, block_items(), chunksize=100):
+            handle_result(result)
 
-        # Process results as they complete
-        for future in as_completed(futures):
-            blocks_processed += 1
-
-            if blocks_processed % 100 == 0:
-                click.echo(
-                    f"\rProcessed {blocks_processed}/{len(blocks_to_process)} blocks, "
-                    f"{spends_processed} spends...",
-                    nl=False,
-                )
-                sys.stdout.flush()
-
-            try:
-                height, mod_data, spend_count, block_errors = future.result()
-
-                if mod_data:
-                    blocks_with_spends += 1
-                    spends_processed += len(mod_data)
-                    if debug:
-                        click.echo(f"  Block {height}: {len(mod_data)} spends")
-
-                    for mod_hash, mod_bytes in mod_data:
-                        mod_counts[mod_hash] += 1
-
-                        # Save unknown MODs if requested
-                        if (
-                            save_unknown_dir
-                            and mod_hash not in KNOWN_MODS
-                            and mod_hash not in saved_unknown_mods
-                        ):
-                            saved_unknown_mods.add(mod_hash)
-                            filepath = unknown_dir / f"{mod_hash.hex()}.clvm.hex"
-                            filepath.write_text(mod_bytes.hex())
-
-                if block_errors > 0:
-                    if spend_count == 0:
-                        generator_errors += 1
-                    else:
-                        errors += block_errors
-
-            except Exception as e:
-                height = futures[future]
-                click.echo(f"\nError at block {height}: {e}", err=True)
-                errors += 1
-
-    click.echo(
-        f"\rProcessed {blocks_processed}/{len(blocks_to_process)} blocks, "
-        f"{spends_processed} spends.    "
-    )
+    click.echo(f"\rProcessed {stats['blocks']} blocks, {stats['spends']} spends.    ")
     click.echo()
-
-    # Sort by count descending
-    sorted_results = sorted(mod_counts.items(), key=lambda x: x[1], reverse=True)
 
     # Print results
+    sorted_results = sorted(mod_counts.items(), key=lambda x: x[1], reverse=True)
+
     click.echo(f"{'MOD Hash':<66} {'Count':>10}  Label")
     click.echo("─" * 90)
 
@@ -252,12 +210,12 @@ def mod_hashes(
 
     click.echo("─" * 90)
     click.echo(f"Total unique MODs: {len(mod_counts)}")
-    click.echo(f"Total spends analyzed: {spends_processed}")
-    click.echo(f"Blocks with generators: {blocks_processed}")
-    click.echo(f"Blocks with spends: {blocks_with_spends}")
-    if generator_errors > 0:
-        click.echo(f"Generator errors: {generator_errors}")
-    if errors > 0:
-        click.echo(f"Spend processing errors: {errors}")
+    click.echo(f"Total spends analyzed: {stats['spends']}")
+    click.echo(f"Blocks with generators: {stats['blocks']}")
+    click.echo(f"Blocks with spends: {stats['blocks_with_spends']}")
+    if stats["gen_errors"] > 0:
+        click.echo(f"Generator errors: {stats['gen_errors']}")
+    if stats["errors"] > 0:
+        click.echo(f"Spend processing errors: {stats['errors']}")
     if save_unknown_dir:
         click.echo(f"Unknown MODs saved: {len(saved_unknown_mods)}")

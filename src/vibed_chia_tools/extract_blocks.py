@@ -140,19 +140,20 @@ def extract_blocks(
         mode = "decompressed blocks" if decompress else "compressed blocks"
     click.echo(f"Mode: Extracting {mode}")
 
-    extracted, skipped, total_size = 0, 0, 0
+    extracted, total_size = 0, 0
+    skip_empty, skip_size, skip_no_gen, skip_error = 0, 0, 0, 0
 
     for header_hash, height, block_data in rows:
         if not block_data:
-            skipped += 1
+            skip_empty += 1
             continue
 
         # Check size filter on compressed data
         if min_size and len(block_data) < min_size:
-            skipped += 1
+            skip_size += 1
             continue
         if max_size and len(block_data) > max_size:
-            skipped += 1
+            skip_size += 1
             continue
 
         # Decompress if needed
@@ -161,7 +162,7 @@ def extract_blocks(
                 block_bytes = zstd.decompress(block_data)
             except Exception as e:
                 click.echo(f"Error decompressing block {height}: {e}", err=True)
-                skipped += 1
+                skip_error += 1
                 continue
         else:
             block_bytes = block_data
@@ -171,12 +172,12 @@ def extract_blocks(
             try:
                 full_block = FullBlock.from_bytes(block_bytes)
                 if full_block.transactions_generator is None:
-                    skipped += 1
+                    skip_no_gen += 1
                     continue
                 output_data = bytes(full_block.transactions_generator)
             except Exception as e:
                 click.echo(f"Error parsing block {height}: {e}", err=True)
-                skipped += 1
+                skip_error += 1
                 continue
         else:
             output_data = block_bytes
@@ -194,8 +195,21 @@ def extract_blocks(
                 click.echo(f"  Extracted {extracted} files...")
         except OSError as e:
             click.echo(f"Error writing {filename}: {e}", err=True)
-            skipped += 1
+            skip_error += 1
 
     click.echo()
-    click.echo(f"Extraction complete: {extracted} files, {skipped} skipped")
+    click.echo(f"Extracted: {extracted} files")
     click.echo(f"Total size: {total_size:,} bytes ({total_size / 1024**2:.2f} MB)")
+
+    # Show skip reasons
+    skipped = skip_empty + skip_size + skip_no_gen + skip_error
+    if skipped > 0:
+        click.echo(f"Skipped: {skipped} blocks")
+        if skip_no_gen:
+            click.echo(f"  - {skip_no_gen} non-transaction blocks (no generator)")
+        if skip_size:
+            click.echo(f"  - {skip_size} outside size filter")
+        if skip_empty:
+            click.echo(f"  - {skip_empty} empty/null blocks")
+        if skip_error:
+            click.echo(f"  - {skip_error} errors")
