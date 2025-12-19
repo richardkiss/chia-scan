@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import click
@@ -156,9 +156,6 @@ def mod_hashes(
         height, mod_data, spend_count, block_errors = result
         stats["blocks"] += 1
 
-        if stats["blocks"] % 500 == 0:
-            click.echo(f"\r{stats['blocks']} blocks, {stats['spends']} spends...", nl=False)
-
         if mod_data:
             stats["blocks_with_spends"] += 1
             stats["spends"] += len(mod_data)
@@ -191,11 +188,28 @@ def mod_hashes(
             yield (block, block_refs)
 
     click.echo("Processing blocks...")
+    buffersize = num_workers * 2
+
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        for result in executor.map(process_block, block_items(), chunksize=100):
+        pending: set[Future] = set()
+
+        for item in block_items():
+            pending.add(executor.submit(process_block, item))
+
+            while len(pending) >= buffersize:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    result = future.result()
+                    click.echo(f"\rBlock {result[0]}...", nl=False)
+                    handle_result(result)
+
+        # Drain remaining
+        for future in pending:
+            result = future.result()
+            click.echo(f"\rBlock {result[0]}...", nl=False)
             handle_result(result)
 
-    click.echo(f"\rProcessed {stats['blocks']} blocks, {stats['spends']} spends.    ")
+    click.echo(f"\rProcessed {stats['blocks']} blocks, {stats['spends']} spends.          ")
     click.echo()
 
     # Print results
