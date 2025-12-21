@@ -15,19 +15,20 @@ from ..utils import DEFAULT_DB_PATH
 
 
 # Type alias for chunk processing result
-# (start_height, end_height, mod_counts dict, stats dict)
+# (rowid_start, rowid_end, mod_counts dict, stats dict)
 ChunkResult = tuple[int, int, dict[bytes, int], dict[str, int]]
 
 
 def _process_chunk(
     db_path: str,
-    start_height: int,
-    end_height: int,
-    cache_size: int,
+    rowid_start: int,
+    rowid_end: int,
+    ref_cache: dict[int, bytes],
 ) -> ChunkResult:
-    """Process a chunk of blocks. Runs entirely in worker process.
+    """Process a chunk of blocks by rowid range. Runs entirely in worker process.
 
     Each worker has its own DB connection and does all I/O + CPU work.
+    ref_cache is a shared Manager dict for lazy caching of generator refs.
     """
     # All imports inside worker to avoid pickling issues
     import sqlite3
@@ -54,13 +55,15 @@ def _process_chunk(
     stats = {"blocks": 0, "blocks_with_spends": 0, "spends": 0, "errors": 0, "gen_errors": 0}
     mod_counts: Counter[bytes] = Counter()
 
-    # Cache for generator refs (local to this worker)
-    ref_cache: dict[int, bytes] = {}
+    # Open DB connection for this worker
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
-    def get_generator_for_height(conn: sqlite3.Connection, height: int) -> bytes | None:
-        """Get generator for a height, using cache."""
-        if height in ref_cache:
-            return ref_cache[height]
+    def get_ref(height: int) -> bytes:
+        """Get generator ref, fetching from DB if not in shared cache."""
+        # Check shared cache first
+        cached = ref_cache.get(height)
+        if cached is not None:
+            return cached
 
         cursor = conn.execute(
             "SELECT block FROM full_blocks WHERE height = ? AND in_main_chain = 1",
@@ -68,33 +71,28 @@ def _process_chunk(
         )
         row = cursor.fetchone()
         if row is None:
-            return None
+            ref_cache[height] = b""
+            return b""
 
         block_bytes = zstd.decompress(row[0])
         full_block = FullBlock.from_bytes(block_bytes)
         if full_block.transactions_generator is None:
-            return None
+            ref_cache[height] = b""
+            return b""
 
         gen_bytes = bytes(full_block.transactions_generator)
-
-        # Cache with size limit (simple FIFO eviction)
-        if len(ref_cache) < cache_size:
-            ref_cache[height] = gen_bytes
-
+        ref_cache[height] = gen_bytes
         return gen_bytes
 
-    # Open DB connection for this worker
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-
     try:
+        # Query by rowid range for contiguous physical reads
         cursor = conn.execute(
             """
             SELECT height, block
             FROM full_blocks
-            WHERE height >= ? AND height <= ? AND in_main_chain = 1
-            ORDER BY height
+            WHERE rowid >= ? AND rowid <= ? AND in_main_chain = 1
             """,
-            (start_height, end_height),
+            (rowid_start, rowid_end),
         )
 
         for row in cursor:
@@ -108,11 +106,9 @@ def _process_chunk(
             stats["blocks"] += 1
             generator = bytes(full_block.transactions_generator)
 
-            # Get referenced generators
-            block_refs: list[bytes] = []
-            for ref_height in full_block.transactions_generator_ref_list:
-                ref_gen = get_generator_for_height(conn, ref_height)
-                block_refs.append(ref_gen if ref_gen else b"")
+            # Get refs lazily from shared cache
+            ref_list = list(full_block.transactions_generator_ref_list)
+            block_refs = [get_ref(h) for h in ref_list]
 
             # Run the generator
             err, spend_result = run_block_generator2(
@@ -151,18 +147,19 @@ def _process_chunk(
     finally:
         conn.close()
 
-    return (start_height, end_height, dict(mod_counts), stats)
+    return (rowid_start, rowid_end, dict(mod_counts), stats)
 
 
 def _process_chunk_with_mods(
     db_path: str,
-    start_height: int,
-    end_height: int,
-    cache_size: int,
+    rowid_start: int,
+    rowid_end: int,
+    ref_cache: dict[int, bytes],
 ) -> tuple[int, int, dict[bytes, int], dict[str, int], dict[bytes, bytes]]:
-    """Process chunk and also return MOD bytes for unknown MODs.
+    """Process chunk by rowid range and also return MOD bytes for unknown MODs.
 
-    Returns: (start, end, mod_counts, stats, mod_bytes_map)
+    Returns: (rowid_start, rowid_end, mod_counts, stats, mod_bytes_map)
+    ref_cache is a shared Manager dict for lazy caching of generator refs.
     """
     # All imports inside worker
     import sqlite3
@@ -188,11 +185,14 @@ def _process_chunk_with_mods(
     stats = {"blocks": 0, "blocks_with_spends": 0, "spends": 0, "errors": 0, "gen_errors": 0}
     mod_counts: Counter[bytes] = Counter()
     mod_bytes_map: dict[bytes, bytes] = {}  # hash -> bytes (for saving unknowns)
-    ref_cache: dict[int, bytes] = {}
 
-    def get_generator_for_height(conn: sqlite3.Connection, height: int) -> bytes | None:
-        if height in ref_cache:
-            return ref_cache[height]
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+
+    def get_ref(height: int) -> bytes:
+        """Get generator ref, fetching from DB if not in shared cache."""
+        cached = ref_cache.get(height)
+        if cached is not None:
+            return cached
 
         cursor = conn.execute(
             "SELECT block FROM full_blocks WHERE height = ? AND in_main_chain = 1",
@@ -200,29 +200,27 @@ def _process_chunk_with_mods(
         )
         row = cursor.fetchone()
         if row is None:
-            return None
+            ref_cache[height] = b""
+            return b""
 
         block_bytes = zstd.decompress(row[0])
         full_block = FullBlock.from_bytes(block_bytes)
         if full_block.transactions_generator is None:
-            return None
+            ref_cache[height] = b""
+            return b""
 
         gen_bytes = bytes(full_block.transactions_generator)
-        if len(ref_cache) < cache_size:
-            ref_cache[height] = gen_bytes
+        ref_cache[height] = gen_bytes
         return gen_bytes
-
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
     try:
         cursor = conn.execute(
             """
             SELECT height, block
             FROM full_blocks
-            WHERE height >= ? AND height <= ? AND in_main_chain = 1
-            ORDER BY height
+            WHERE rowid >= ? AND rowid <= ? AND in_main_chain = 1
             """,
-            (start_height, end_height),
+            (rowid_start, rowid_end),
         )
 
         for row in cursor:
@@ -236,10 +234,9 @@ def _process_chunk_with_mods(
             stats["blocks"] += 1
             generator = bytes(full_block.transactions_generator)
 
-            block_refs: list[bytes] = []
-            for ref_height in full_block.transactions_generator_ref_list:
-                ref_gen = get_generator_for_height(conn, ref_height)
-                block_refs.append(ref_gen if ref_gen else b"")
+            # Get refs lazily from shared cache
+            ref_list = list(full_block.transactions_generator_ref_list)
+            block_refs = [get_ref(h) for h in ref_list]
 
             err, spend_result = run_block_generator2(
                 generator,
@@ -282,7 +279,7 @@ def _process_chunk_with_mods(
     finally:
         conn.close()
 
-    return (start_height, end_height, dict(mod_counts), stats, mod_bytes_map)
+    return (rowid_start, rowid_end, dict(mod_counts), stats, mod_bytes_map)
 
 
 @click.command()
@@ -330,13 +327,6 @@ def _process_chunk_with_mods(
     help="Blocks per worker chunk (default: 500)",
 )
 @click.option(
-    "--cache-size",
-    "cache_size",
-    default=500,
-    type=int,
-    help="Generator ref cache size per worker (default: 500)",
-)
-@click.option(
     "--save-unknown",
     "save_unknown_dir",
     type=click.Path(),
@@ -354,7 +344,6 @@ def mod_hashes(
     top_n: int,
     num_workers: int | None,
     chunk_size: int,
-    cache_size: int,
     save_unknown_dir: str | None,
     debug: bool,
 ) -> None:
@@ -365,22 +354,48 @@ def mod_hashes(
 
     Uses multiprocessing with each worker processing independent block ranges.
     """
+    import sqlite3
+
     if num_workers is None:
         num_workers = mp.cpu_count()
 
-    total_blocks = end_height - start_height + 1
-
-    click.echo(f"Analyzing blocks {start_height} to {end_height} ({total_blocks:,} blocks)...")
+    # Quick DB query to get rowid range for our height range
     click.echo(f"Database: {db_path}")
+    click.echo("Querying database...")
+
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        # Get rowid range and block count for our height range
+        row = conn.execute(
+            """
+            SELECT MIN(rowid), MAX(rowid), COUNT(*), MIN(height), MAX(height)
+            FROM full_blocks
+            WHERE height >= ? AND height <= ? AND in_main_chain = 1
+            """,
+            (start_height, end_height),
+        ).fetchone()
+        min_rowid, max_rowid, actual_blocks, actual_min, actual_max = row
+
+        if min_rowid is None or actual_blocks == 0:
+            click.echo("No blocks found in range.")
+            return
+
+    finally:
+        conn.close()
+
+    click.echo(f"Found {actual_blocks:,} blocks in range {actual_min:,} to {actual_max:,}")
+    click.echo(f"Rowid range: {min_rowid:,} to {max_rowid:,}")
     click.echo(f"Workers: {num_workers} (processes)")
-    click.echo(f"Chunk size: {chunk_size:,} blocks per worker")
+    click.echo(f"Chunk size: {chunk_size:,} rows per worker")
     click.echo()
 
-    # Create chunks for parallel processing
-    chunks: list[tuple[int, int]] = []
-    for chunk_start in range(start_height, end_height + 1, chunk_size):
-        chunk_end = min(chunk_start + chunk_size - 1, end_height)
-        chunks.append((chunk_start, chunk_end))
+    # Create chunks by rowid for contiguous physical reads
+    chunks: list[tuple[int, int]] = []  # (rowid_start, rowid_end)
+    total_rowids = max_rowid - min_rowid + 1
+    for chunk_idx in range(0, total_rowids, chunk_size):
+        rowid_start = min_rowid + chunk_idx
+        rowid_end = min(rowid_start + chunk_size - 1, max_rowid)
+        chunks.append((rowid_start, rowid_end))
 
     click.echo(f"Split into {len(chunks)} chunks")
 
@@ -417,18 +432,22 @@ def mod_hashes(
     # Choose worker function based on whether we need mod bytes
     worker_fn = _process_chunk_with_mods if save_unknown_dir else _process_chunk
 
+    # Create a shared cache for generator refs (lazily populated by workers)
+    manager = mp.Manager()
+    ref_cache = manager.dict()
+
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # Submit all chunks
+        # Submit all chunks (by rowid range) with shared ref_cache
         futures = {
-            executor.submit(worker_fn, db_path, chunk_start, chunk_end, cache_size): (
-                chunk_start,
-                chunk_end,
+            executor.submit(worker_fn, db_path, rowid_start, rowid_end, ref_cache): (
+                rowid_start,
+                rowid_end,
             )
-            for chunk_start, chunk_end in chunks
+            for rowid_start, rowid_end in chunks
         }
 
         for future in as_completed(futures):
-            chunk_start, chunk_end = futures[future]
+            rowid_start, rowid_end = futures[future]
             chunks_done += 1
 
             try:
@@ -475,10 +494,10 @@ def mod_hashes(
                     )
 
                 if debug:
-                    click.echo(f"\n  Chunk {chunk_start}-{chunk_end}: {chunk_stats}")
+                    click.echo(f"\n  Chunk rowid {rowid_start}-{rowid_end}: {chunk_stats}")
 
             except Exception as e:
-                click.echo(f"\nError processing chunk {chunk_start}-{chunk_end}: {e}")
+                click.echo(f"\nError processing chunk rowid {rowid_start}-{rowid_end}: {e}")
 
     total_elapsed = time.time() - start_time
     click.echo()
@@ -515,3 +534,5 @@ def mod_hashes(
         click.echo(f"Spend processing errors: {total_stats['errors']}")
     if save_unknown_dir:
         click.echo(f"Unknown MODs saved: {saved_count}")
+    if ref_cache:
+        click.echo(f"Generator refs cached: {len(ref_cache)}")
