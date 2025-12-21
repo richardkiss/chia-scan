@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import time
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -324,9 +325,9 @@ def _process_chunk_with_mods(
 @click.option(
     "--chunk-size",
     "chunk_size",
-    default=5000,
+    default=500,
     type=int,
-    help="Blocks per worker chunk (default: 5000)",
+    help="Blocks per worker chunk (default: 500)",
 )
 @click.option(
     "--cache-size",
@@ -399,6 +400,19 @@ def mod_hashes(
     click.echo("Processing chunks...")
 
     chunks_done = 0
+    start_time = time.time()
+
+    def format_duration(seconds: float) -> str:
+        """Format seconds as human-readable duration."""
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        elif seconds < 3600:
+            mins, secs = divmod(int(seconds), 60)
+            return f"{mins}m {secs}s"
+        else:
+            hours, remainder = divmod(int(seconds), 3600)
+            mins, secs = divmod(remainder, 60)
+            return f"{hours}h {mins}m {secs}s"
 
     # Choose worker function based on whether we need mod bytes
     worker_fn = _process_chunk_with_mods if save_unknown_dir else _process_chunk
@@ -436,12 +450,29 @@ def mod_hashes(
                 for key in total_stats:
                     total_stats[key] += chunk_stats[key]
 
-                progress = chunks_done / len(chunks) * 100
-                click.echo(
-                    f"\r[{chunks_done}/{len(chunks)}] {progress:.1f}% - "
-                    f"Blocks: {total_stats['blocks']:,}, Spends: {total_stats['spends']:,}   ",
-                    nl=False,
-                )
+                # Calculate progress and ETA
+                elapsed = time.time() - start_time
+                progress = chunks_done / len(chunks)
+                progress_pct = progress * 100
+
+                if chunks_done > 0 and progress > 0:
+                    eta_seconds = (elapsed / progress) * (1 - progress)
+                    eta_str = format_duration(eta_seconds)
+                    elapsed_str = format_duration(elapsed)
+                    blocks_per_sec = total_stats["blocks"] / elapsed if elapsed > 0 else 0
+
+                    click.echo(
+                        f"\r[{chunks_done}/{len(chunks)}] {progress_pct:.1f}% - "
+                        f"Blocks: {total_stats['blocks']:,}, Spends: {total_stats['spends']:,} | "
+                        f"{blocks_per_sec:.0f} blk/s | "
+                        f"Elapsed: {elapsed_str}, ETA: {eta_str}   ",
+                        nl=False,
+                    )
+                else:
+                    click.echo(
+                        f"\r[{chunks_done}/{len(chunks)}] {progress_pct:.1f}% - Starting...   ",
+                        nl=False,
+                    )
 
                 if debug:
                     click.echo(f"\n  Chunk {chunk_start}-{chunk_end}: {chunk_stats}")
@@ -449,7 +480,10 @@ def mod_hashes(
             except Exception as e:
                 click.echo(f"\nError processing chunk {chunk_start}-{chunk_end}: {e}")
 
+    total_elapsed = time.time() - start_time
     click.echo()
+    click.echo()
+    click.echo(f"Completed in {format_duration(total_elapsed)}")
     click.echo()
 
     # Save unknown MODs if requested
