@@ -11,8 +11,6 @@ from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from typing import TYPE_CHECKING
 
-from chia_rs.sized_ints import uint64
-
 from chia_rs import (
     DONT_VALIDATE_SIGNATURE,
     Coin,
@@ -21,10 +19,11 @@ from chia_rs import (
     get_puzzle_and_solution_for_coin2,
     run_block_generator2,
 )
+from chia_rs.sized_ints import uint64
 from clvm_rs import Program as CLVMProgram
 
 from ..constants import MAINNET_CONSTANTS
-from .db_reader import BlockData, BlockReader, get_generators_for_refs, iterate_blocks
+from .db_reader import BlockData, BlockReader, get_generators_for_refs
 
 if TYPE_CHECKING:
     from collections.abc import Callable

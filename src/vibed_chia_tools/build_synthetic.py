@@ -5,12 +5,11 @@ import sys
 from io import BytesIO
 from pathlib import Path
 
+import chia_rs
 import click
 import clvm.serialize as ser_module
 from clvm.CLVMObject import CLVMObject
 from clvm.serialize import sexp_to_stream
-
-import chia_rs
 
 from .utils import parse_size
 

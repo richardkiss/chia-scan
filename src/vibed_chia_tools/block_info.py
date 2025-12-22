@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 
 import click
 import zstd
-
 from chia_rs import FullBlock
 
 from .known_mods import get_mod_label
@@ -52,8 +51,6 @@ def analyze_block(block_bytes: bytes, db_path: str, show_mods: bool) -> dict:
         return info
 
     # Run generator to get spend details
-    from chia_rs.sized_ints import uint64
-
     from chia_rs import (
         DONT_VALIDATE_SIGNATURE,
         Coin,
@@ -62,6 +59,7 @@ def analyze_block(block_bytes: bytes, db_path: str, show_mods: bool) -> dict:
         get_puzzle_and_solution_for_coin2,
         run_block_generator2,
     )
+    from chia_rs.sized_ints import uint64
     from clvm_rs import Program as CLVMProgram
 
     from .constants import MAINNET_CONSTANTS

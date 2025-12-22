@@ -2,10 +2,9 @@
 
 from hashlib import sha256
 
+from chia_rs import ConsensusConstants
 from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint8, uint16, uint32, uint64, uint128
-
-from chia_rs import ConsensusConstants
 
 
 def std_hash(data: bytes) -> bytes32:

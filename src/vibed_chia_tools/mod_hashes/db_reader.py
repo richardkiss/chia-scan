@@ -6,11 +6,9 @@ import sqlite3
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 
 import zstd
-
 from chia_rs import FullBlock
 
 
@@ -255,7 +253,7 @@ class BlockReader:
         self.ref_cache = GeneratorRefCache(db_path, max_size=cache_size)
         self._conn: sqlite3.Connection | None = None
 
-    def __enter__(self) -> "BlockReader":
+    def __enter__(self) -> BlockReader:
         self._conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
         self._conn.row_factory = sqlite3.Row
         return self

@@ -13,10 +13,9 @@ import click
 from ..known_mods import KNOWN_MODS, get_mod_label
 from ..utils import DEFAULT_DB_PATH
 
-
 # Type alias for chunk processing result
-# (rowid_start, rowid_end, mod_counts dict, stats dict)
-ChunkResult = tuple[int, int, dict[bytes, int], dict[str, int]]
+# (rowid_start, rowid_end, mod_counts dict, stats dict, mod_bytes dict or None)
+ChunkResult = tuple[int, int, dict[bytes, int], dict[str, int], dict[bytes, bytes] | None]
 
 
 def _process_chunk(
@@ -24,172 +23,34 @@ def _process_chunk(
     rowid_start: int,
     rowid_end: int,
     ref_cache: dict[int, bytes],
+    collect_mod_bytes: bool = False,
 ) -> ChunkResult:
     """Process a chunk of blocks by rowid range. Runs entirely in worker process.
 
     Each worker has its own DB connection and does all I/O + CPU work.
     ref_cache is a shared Manager dict for lazy caching of generator refs.
+    If collect_mod_bytes is True, also returns mod bytes for saving unknown MODs.
     """
     # All imports inside worker to avoid pickling issues
     import sqlite3
     from collections import Counter
 
     import zstd
-    from chia_rs import (
-        DONT_VALIDATE_SIGNATURE,
-        Coin,
-        FullBlock,
-        G2Element,
-        Program,
-        get_puzzle_and_solution_for_coin2,
-        run_block_generator2,
-    )
-    from chia_rs.sized_ints import uint64
+    from chia_rs import FullBlock, Program, get_spends_for_trusted_block
     from clvm_rs import Program as CLVMProgram
 
     from ..constants import MAINNET_CONSTANTS
 
-    max_cost = 0xFFFFFFFFFFFFFFFF
-
     # Local stats for this chunk
     stats = {"blocks": 0, "blocks_with_spends": 0, "spends": 0, "errors": 0, "gen_errors": 0}
     mod_counts: Counter[bytes] = Counter()
+    mod_bytes_map: dict[bytes, bytes] | None = {} if collect_mod_bytes else None
 
     # Open DB connection for this worker
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
     def get_ref(height: int) -> bytes:
         """Get generator ref, fetching from DB if not in shared cache."""
-        # Check shared cache first
-        cached = ref_cache.get(height)
-        if cached is not None:
-            return cached
-
-        cursor = conn.execute(
-            "SELECT block FROM full_blocks WHERE height = ? AND in_main_chain = 1",
-            (height,),
-        )
-        row = cursor.fetchone()
-        if row is None:
-            ref_cache[height] = b""
-            return b""
-
-        block_bytes = zstd.decompress(row[0])
-        full_block = FullBlock.from_bytes(block_bytes)
-        if full_block.transactions_generator is None:
-            ref_cache[height] = b""
-            return b""
-
-        gen_bytes = bytes(full_block.transactions_generator)
-        ref_cache[height] = gen_bytes
-        return gen_bytes
-
-    try:
-        # Query by rowid range for contiguous physical reads
-        cursor = conn.execute(
-            """
-            SELECT height, block
-            FROM full_blocks
-            WHERE rowid >= ? AND rowid <= ? AND in_main_chain = 1
-            """,
-            (rowid_start, rowid_end),
-        )
-
-        for row in cursor:
-            height = row[0]
-            block_bytes = zstd.decompress(row[1])
-            full_block = FullBlock.from_bytes(block_bytes)
-
-            if full_block.transactions_generator is None:
-                continue
-
-            stats["blocks"] += 1
-            generator = bytes(full_block.transactions_generator)
-
-            # Get refs lazily from shared cache
-            ref_list = list(full_block.transactions_generator_ref_list)
-            block_refs = [get_ref(h) for h in ref_list]
-
-            # Run the generator
-            err, spend_result = run_block_generator2(
-                generator,
-                block_refs,
-                max_cost,
-                DONT_VALIDATE_SIGNATURE,
-                G2Element(),
-                None,
-                MAINNET_CONSTANTS,
-            )
-
-            if err is not None or spend_result is None:
-                stats["gen_errors"] += 1
-                continue
-
-            if not spend_result.spends:
-                continue
-
-            stats["blocks_with_spends"] += 1
-            generator_program = Program.from_bytes(generator)
-
-            for spend in spend_result.spends:
-                try:
-                    coin = Coin(spend.parent_id, spend.puzzle_hash, uint64(spend.coin_amount))
-                    puzzle, _ = get_puzzle_and_solution_for_coin2(
-                        generator_program, block_refs, max_cost, coin, 0
-                    )
-                    clvm_puzzle = CLVMProgram.from_bytes(bytes(puzzle))
-                    mod, _ = clvm_puzzle.uncurry()
-                    mod_counts[mod.tree_hash()] += 1
-                    stats["spends"] += 1
-                except Exception:
-                    stats["errors"] += 1
-
-    finally:
-        conn.close()
-
-    return (rowid_start, rowid_end, dict(mod_counts), stats)
-
-
-def _process_chunk_with_mods(
-    db_path: str,
-    rowid_start: int,
-    rowid_end: int,
-    ref_cache: dict[int, bytes],
-) -> tuple[int, int, dict[bytes, int], dict[str, int], dict[bytes, bytes]]:
-    """Process chunk by rowid range and also return MOD bytes for unknown MODs.
-
-    Returns: (rowid_start, rowid_end, mod_counts, stats, mod_bytes_map)
-    ref_cache is a shared Manager dict for lazy caching of generator refs.
-    """
-    # All imports inside worker
-    import sqlite3
-    from collections import Counter
-
-    import zstd
-    from chia_rs import (
-        DONT_VALIDATE_SIGNATURE,
-        Coin,
-        FullBlock,
-        G2Element,
-        Program,
-        get_puzzle_and_solution_for_coin2,
-        run_block_generator2,
-    )
-    from chia_rs.sized_ints import uint64
-    from clvm_rs import Program as CLVMProgram
-
-    from ..constants import MAINNET_CONSTANTS
-
-    max_cost = 0xFFFFFFFFFFFFFFFF
-
-    stats = {"blocks": 0, "blocks_with_spends": 0, "spends": 0, "errors": 0, "gen_errors": 0}
-    mod_counts: Counter[bytes] = Counter()
-    mod_bytes_map: dict[bytes, bytes] = {}  # hash -> bytes (for saving unknowns)
-
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-
-    def get_ref(height: int) -> bytes:
-        """Get generator ref, fetching from DB if not in shared cache."""
         cached = ref_cache.get(height)
         if cached is not None:
             return cached
@@ -216,62 +77,51 @@ def _process_chunk_with_mods(
     try:
         cursor = conn.execute(
             """
-            SELECT height, block
+            SELECT block
             FROM full_blocks
             WHERE rowid >= ? AND rowid <= ? AND in_main_chain = 1
             """,
             (rowid_start, rowid_end),
         )
 
-        for row in cursor:
-            height = row[0]
-            block_bytes = zstd.decompress(row[1])
+        for (block_blob,) in cursor:
+            block_bytes = zstd.decompress(block_blob)
             full_block = FullBlock.from_bytes(block_bytes)
 
             if full_block.transactions_generator is None:
                 continue
 
             stats["blocks"] += 1
-            generator = bytes(full_block.transactions_generator)
+            generator = Program.from_bytes(bytes(full_block.transactions_generator))
 
             # Get refs lazily from shared cache
             ref_list = list(full_block.transactions_generator_ref_list)
             block_refs = [get_ref(h) for h in ref_list]
 
-            err, spend_result = run_block_generator2(
-                generator,
-                block_refs,
-                max_cost,
-                DONT_VALIDATE_SIGNATURE,
-                G2Element(),
-                None,
-                MAINNET_CONSTANTS,
-            )
-
-            if err is not None or spend_result is None:
+            # Get all spends with puzzles in ONE call (no second CLVM run!)
+            try:
+                result = get_spends_for_trusted_block(MAINNET_CONSTANTS, generator, block_refs, 0)
+                spends = result.get("block_spends", [])
+            except Exception:
                 stats["gen_errors"] += 1
                 continue
 
-            if not spend_result.spends:
+            if not spends:
                 continue
 
             stats["blocks_with_spends"] += 1
-            generator_program = Program.from_bytes(generator)
 
-            for spend in spend_result.spends:
+            for coin_spend in spends:
                 try:
-                    coin = Coin(spend.parent_id, spend.puzzle_hash, uint64(spend.coin_amount))
-                    puzzle, _ = get_puzzle_and_solution_for_coin2(
-                        generator_program, block_refs, max_cost, coin, 0
-                    )
+                    # puzzle_reveal is already extracted - just uncurry it
+                    puzzle = coin_spend.puzzle_reveal
                     clvm_puzzle = CLVMProgram.from_bytes(bytes(puzzle))
                     mod, _ = clvm_puzzle.uncurry()
                     mod_hash = mod.tree_hash()
                     mod_counts[mod_hash] += 1
                     stats["spends"] += 1
 
-                    # Store mod bytes if we haven't seen it
-                    if mod_hash not in mod_bytes_map:
+                    if mod_bytes_map is not None and mod_hash not in mod_bytes_map:
                         mod_bytes_map[mod_hash] = bytes(mod)
                 except Exception:
                     stats["errors"] += 1
@@ -429,20 +279,17 @@ def mod_hashes(
             mins, secs = divmod(remainder, 60)
             return f"{hours}h {mins}m {secs}s"
 
-    # Choose worker function based on whether we need mod bytes
-    worker_fn = _process_chunk_with_mods if save_unknown_dir else _process_chunk
-
     # Create a shared cache for generator refs (lazily populated by workers)
     manager = mp.Manager()
     ref_cache = manager.dict()
+    collect_mod_bytes = save_unknown_dir is not None
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         # Submit all chunks (by rowid range) with shared ref_cache
         futures = {
-            executor.submit(worker_fn, db_path, rowid_start, rowid_end, ref_cache): (
-                rowid_start,
-                rowid_end,
-            )
+            executor.submit(
+                _process_chunk, db_path, rowid_start, rowid_end, ref_cache, collect_mod_bytes
+            ): (rowid_start, rowid_end)
             for rowid_start, rowid_end in chunks
         }
 
@@ -451,16 +298,13 @@ def mod_hashes(
             chunks_done += 1
 
             try:
-                result = future.result()
+                _, _, chunk_mods, chunk_stats, chunk_mod_bytes = future.result()
 
-                if save_unknown_dir:
-                    _, _, chunk_mods, chunk_stats, chunk_mod_bytes = result
-                    # Collect mod bytes for saving
+                # Collect mod bytes for saving if requested
+                if chunk_mod_bytes:
                     for mod_hash, mod_bytes in chunk_mod_bytes.items():
                         if mod_hash not in all_mod_bytes:
                             all_mod_bytes[mod_hash] = mod_bytes
-                else:
-                    _, _, chunk_mods, chunk_stats = result
 
                 # Aggregate counts
                 mod_counts.update(chunk_mods)

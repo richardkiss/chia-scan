@@ -6,7 +6,6 @@ from pathlib import Path
 
 import click
 import zstd
-
 from chia_rs import FullBlock
 
 from .utils import DEFAULT_DB_PATH, open_db, parse_range
