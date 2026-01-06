@@ -125,14 +125,6 @@ def extract_blocks(
         WHERE {" AND ".join(conditions)} ORDER BY height
     """
 
-    try:
-        with open_db(db_path) as conn:
-            rows = conn.execute(query, params).fetchall()
-    except sqlite3.Error as e:
-        click.echo(f"Database error: {e}", err=True)
-        sys.exit(1)
-
-    click.echo(f"Found {len(rows)} blocks matching criteria")
     if generator_only:
         mode = "generators"
     else:
@@ -142,59 +134,69 @@ def extract_blocks(
     extracted, total_size = 0, 0
     skip_empty, skip_size, skip_no_gen, skip_error = 0, 0, 0, 0
 
-    for header_hash, height, block_data in rows:
-        if not block_data:
-            skip_empty += 1
-            continue
+    try:
+        with open_db(db_path) as conn:
+            # Stream results instead of fetchall() to avoid loading all blocks into memory
+            click.echo("Streaming blocks from database...")
+            cursor = conn.execute(query, params)
 
-        # Check size filter on compressed data
-        if min_size and len(block_data) < min_size:
-            skip_size += 1
-            continue
-        if max_size and len(block_data) > max_size:
-            skip_size += 1
-            continue
-
-        # Decompress if needed
-        if decompress or generator_only:
-            try:
-                block_bytes = zstd.decompress(block_data)
-            except Exception as e:
-                click.echo(f"Error decompressing block {height}: {e}", err=True)
-                skip_error += 1
-                continue
-        else:
-            block_bytes = block_data
-
-        # Extract generator if requested
-        if generator_only:
-            try:
-                full_block = FullBlock.from_bytes(block_bytes)
-                if full_block.transactions_generator is None:
-                    skip_no_gen += 1
+            for header_hash, height, block_data in cursor:
+                if not block_data:
+                    skip_empty += 1
                     continue
-                output_data = bytes(full_block.transactions_generator)
-            except Exception as e:
-                click.echo(f"Error parsing block {height}: {e}", err=True)
-                skip_error += 1
-                continue
-        else:
-            output_data = block_bytes
 
-        # Write file
-        prefix = "generator" if generator_only else "block"
-        ext = ".bin" if (decompress or generator_only) else ".bin.zstd"
-        filename = f"{prefix}_{height:010d}_{header_hash.hex()[:16]}{ext}"
+                # Check size filter on compressed data
+                if min_size and len(block_data) < min_size:
+                    skip_size += 1
+                    continue
+                if max_size and len(block_data) > max_size:
+                    skip_size += 1
+                    continue
 
-        try:
-            (output_path / filename).write_bytes(output_data)
-            extracted += 1
-            total_size += len(output_data)
-            if extracted % 100 == 0:
-                click.echo(f"  Extracted {extracted} files...")
-        except OSError as e:
-            click.echo(f"Error writing {filename}: {e}", err=True)
-            skip_error += 1
+                # Decompress if needed
+                if decompress or generator_only:
+                    try:
+                        block_bytes = zstd.decompress(block_data)
+                    except Exception as e:
+                        click.echo(f"Error decompressing block {height}: {e}", err=True)
+                        skip_error += 1
+                        continue
+                else:
+                    block_bytes = block_data
+
+                # Extract generator if requested
+                if generator_only:
+                    try:
+                        full_block = FullBlock.from_bytes(block_bytes)
+                        if full_block.transactions_generator is None:
+                            skip_no_gen += 1
+                            continue
+                        output_data = bytes(full_block.transactions_generator)
+                    except Exception as e:
+                        click.echo(f"Error parsing block {height}: {e}", err=True)
+                        skip_error += 1
+                        continue
+                else:
+                    output_data = block_bytes
+
+                # Write file
+                prefix = "generator" if generator_only else "block"
+                ext = ".bin" if (decompress or generator_only) else ".bin.zstd"
+                filename = f"{prefix}_{height:010d}_{header_hash.hex()[:16]}{ext}"
+
+                try:
+                    (output_path / filename).write_bytes(output_data)
+                    extracted += 1
+                    total_size += len(output_data)
+                    if extracted % 100 == 0:
+                        click.echo(f"  Extracted {extracted} files...")
+                except OSError as e:
+                    click.echo(f"Error writing {filename}: {e}", err=True)
+                    skip_error += 1
+
+    except sqlite3.Error as e:
+        click.echo(f"Database error: {e}", err=True)
+        sys.exit(1)
 
     click.echo()
     click.echo(f"Extracted: {extracted} files")
