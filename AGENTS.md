@@ -1,5 +1,16 @@
 # Chia Codebase Quick Reference
 
+## Architecture
+
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐     ┌──────────────┐
+│ mainnet.db  │────▶│  Block       │────▶│   Puzzle    │────▶│  MOD Hash    │
+│  (SQLite)   │     │  Reader      │     │  Extractor  │     │  Counter     │
+└─────────────┘     └──────────────┘     └─────────────┘     └──────────────┘
+```
+
+The tools read from the Chia blockchain SQLite database, decompress and parse blocks, extract puzzle reveals from generators, and analyze/transform the data.
+
 ## chia_rs (Rust + Python bindings)
 - **Generator execution**: `chia_rs.run_block_generator()` / `run_block_generator2()` 
   - Returns `(error_code, SpendBundleConditions)` - conditions only, no puzzle reveals
