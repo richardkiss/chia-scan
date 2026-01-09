@@ -1,4 +1,4 @@
-# vibed-chia-tools
+# chia-scan
 
 A collection of tools for analyzing and working with the Chia blockchain.
 

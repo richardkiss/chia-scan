@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vibed-chia-tools"
+name = "chia-scan"
 version = "0.1.0"
 description = "Tools for Chia blockchain"
 readme = "README.md"
@@ -40,11 +40,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/vibed-chia-tools"
-Repository = "https://github.com/yourusername/vibed-chia-tools"
+Homepage = "https://github.com/richardkiss/chia-scan"
+Repository = "https://github.com/richardkiss/chia-scan"
 
 [project.scripts]
-chia-scan = "vibed_chia_tools.cli:main"
+chia-scan = "chia_scan.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -64,7 +64,7 @@ warn_unused_ignores = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --cov=vibed_chia_tools"
+addopts = "-v --cov=chia_scan"
 
 [tool.uv]
 dev-dependencies = [

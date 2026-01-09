@@ -1,4 +1,4 @@
-"""CLI entry point for vibed-chia-tools."""
+"""CLI entry point for chia-scan."""
 
 import click
 
