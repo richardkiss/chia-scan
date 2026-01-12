@@ -181,13 +181,18 @@ Options:
    chia-scan build-synthetic -i ./generators -o synthetic.bin --target-size 1M
    ```
 
+## Skills Documentation
+
+The `skills/` directory contains detailed guides for common tasks:
+
+- **[CLVM Decompiler](skills/clvm-decompiler.md)** - Comprehensive guide to decompiling CLVM bytecode (`.clvm.hex`) into human-readable Chialisp (`.clsp`). Covers serialization format, opcodes, path encoding, the `opd`/`opc`/`brun`/`run` toolchain, and techniques for achieving byte-identical decompilation.
+
 ## Roadmap
 
 Future tool ideas:
 
 - **Coin Tracer** - Trace coin lineage through the blockchain
 - **Mempool Analyzer** - Analyze pending transactions
-- **Puzzle Decompiler** - Decompile CLVM to readable Chialisp
 - **Block Stats** - Aggregate statistics per block/range
 
 ## Development
